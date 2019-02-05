@@ -170,22 +170,9 @@ func (f *FuseFS) Open(path string, flags uint32, context *fuse.Context) (file no
 	return NewFuseFile([]byte(data), IfRegRW, path, f.zh), fuse.OK
 }
 
-// Unlink removes the file/znode from the tree. A pre-check is performed in order to ensure it still exists in ZK, then the Delete() is performed.
+// Unlink removes the file/znode from the tree.
 func (f *FuseFS) Unlink(path string, context *fuse.Context) (code fuse.Status) {
-	found, _, err := f.zh.Exists(path)
-
-	if err != nil {
-		log.Error(err)
-		return fuse.ENOENT
-	}
-	if !found {
-		log.WithFields(log.Fields{
-			"path": path,
-		}).Error("znode does not exist")
-		return fuse.ENOENT
-	}
-
-	err = f.zh.Delete(path, -1)
+	err := f.zh.Delete(path, -1)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"path": path,
