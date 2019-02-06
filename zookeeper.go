@@ -166,7 +166,7 @@ func (m *MockZooHandle) Exists(path string) (bool, *zk.Stat, error) {
 }
 
 func (m *MockZooHandle) Set(path string, data []byte, version int32) (*zk.Stat, error) {
-	args := m.zk.Called(path)
+	args := m.zk.Called(path, data, version)
 	return args.Get(0).(*zk.Stat), args.Error(1)
 }
 
