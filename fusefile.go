@@ -43,7 +43,8 @@ func (f *FuseFile) Read(buf []byte, off int64) (fuse.ReadResult, fuse.Status) {
 	return fuse.ReadResultData(f.data[off:end]), fuse.OK
 }
 
-// Write pushes the []byte array into the Zookeeper node. An array size of 0 is a (silent) no-op
+// Write pushes the []byte array into the Zookeeper node. An array size of 0 is a (silent) no-op. Returns
+// the number of bytes written and the status of the errno returns to kernel.
 func (f *FuseFile) Write(content []byte, off int64) (uint32, fuse.Status) {
 
 	// save a round trip to zk in the event the content length is 0
