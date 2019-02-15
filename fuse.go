@@ -2,12 +2,12 @@ package main
 
 import (
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hanwen/go-fuse/fuse"
 	"github.com/hanwen/go-fuse/fuse/nodefs"
 	"github.com/hanwen/go-fuse/fuse/pathfs"
-
 	"github.com/samuel/go-zookeeper/zk"
 	log "github.com/sirupsen/logrus"
 )
@@ -22,6 +22,10 @@ const (
 	IfRegRW = uint32(0644)
 	// IfRegRO file mask for RO files
 	IfRegRO = uint32(0444)
+
+	// MaxConcurrentRequests represents max number of parallel requests to send to the remote ZK directory.
+	// This attempts to speed up OpenDir requests to trees that have many children.
+	MaxConcurrentRequests = 25
 )
 
 // FuseFS is the container for the filesystem. This is built-upon the go-fuse "pathfs" machinery. The other notable
@@ -96,7 +100,7 @@ func (f *FuseFS) GetAttr(path string, context *fuse.Context) (*fuse.Attr, fuse.S
 // performing a fetch of all `Children` znodes for the current `path`. The only file
 // attributes set here is the `mode` (S_IFDIR or S_IFREG)
 func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, fuse.Status) {
-	c, _, err := f.zh.Children(path)
+	children, _, err := f.zh.Children(path)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"path": path,
@@ -105,31 +109,54 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 		return nil, fuse.ENOENT
 	}
 
-	var entries []fuse.DirEntry
-	for _, cld := range c {
-		found, stat, err := f.zh.Exists(filepath.Join(path, "/", cld))
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		if !found {
-			log.WithFields(log.Fields{
-				"path": path,
-			}).Error("znode does not exist")
-			continue
-		}
+	var dirEntries []fuse.DirEntry
 
-		de := fuse.DirEntry{}
-		de.Name = cld
-
-		if stat.NumChildren > 0 {
-			de.Mode = fuse.S_IFDIR
-		} else {
-			de.Mode = fuse.S_IFREG
-		}
-		entries = append(entries, de)
+	if len(children) == 0 {
+		return dirEntries, fuse.OK
 	}
-	return entries, fuse.OK
+
+	maxWorkers := MaxConcurrentRequests
+
+	if maxWorkers > len(children) {
+		maxWorkers = len(children)
+	}
+
+	chanLimiter := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	for _, child := range children {
+		wg.Add(1)
+		go func(path, directory string) {
+			defer wg.Done()
+			chanLimiter <- struct{}{}
+
+			defer func() {
+				<-chanLimiter
+			}()
+
+			found, stat, err := f.zh.Exists(filepath.Join(path, "/", directory))
+			if err != nil {
+				log.Error(err)
+				return
+			}
+
+			if !found {
+				log.WithFields(log.Fields{
+					"path": path,
+				}).Error("znode does not exist")
+				return
+			}
+
+			dirEntry := fuse.DirEntry{Name: directory}
+			if stat.NumChildren > 0 {
+				dirEntry.Mode = fuse.S_IFDIR
+			} else {
+				dirEntry.Mode = fuse.S_IFREG
+			}
+			dirEntries = append(dirEntries, dirEntry)
+		}(path, child)
+	}
+	wg.Wait()
+	return dirEntries, fuse.OK
 }
 
 // Utimens is called after the creation of a file. This syscall sets the timestamps in nanos.
