@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/samuel/go-zookeeper/zk"
@@ -12,7 +14,14 @@ import (
 
 const (
 	// MaxZnodeData represents the maximum size of the data object per znode
-	MaxZnodeData = 1048576
+	// See "jute.maxbuffer" at https://zookeeper.apache.org/doc/r3.3.3/zookeeperAdmin.html#Unsafe+Options
+	MaxZnodeData = 1048575
+
+	// ZNodeMarker is a special file that provides the contents of the parent znode.
+	// If a znode is deemed to be a directory (has children), the ZNodeMarker file is used
+	// as a file in order to allow access to data. Required since standard directories do not
+	// allow file content.
+	ZNodeMarker = "__znode_data__"
 )
 
 // Zoohandler defines the minimun actions required to fetch, delete and create entries in the Zookeeper directory.
@@ -48,14 +57,17 @@ type ZooHandle struct {
 // this also supports the ability to "chroot" (`ZKRoot`) a Zookeeper znode to the root "/" view. For example if you were to
 // ZKRoot "/my/zookeeper/sub/znode" , the Fuse file system will condsider  "/my/zookeeper/sub/znode" as "/" and entries above
 // this path are not visibile within Fuse.
-// TODO: ugly++
 func (z *ZooHandle) ZKPath(path string) string {
 	rel, err := filepath.Rel(z.FuseMount, filepath.Join(z.FuseMount, path))
 	if err != nil {
 		log.Warn(err)
-		return filepath.Join("/", z.ZKRoot)
+		return filepath.Join(string(os.PathSeparator), z.ZKRoot)
 	}
-	return filepath.Join("/", z.ZKRoot, rel)
+
+	// if this is a special file (`ZnodeMarker`), this is aliased to the parent directory
+	// so the user can fetch metadata for that znode.
+	rel = strings.TrimSuffix(rel, ZNodeMarker)
+	return filepath.Join(string(os.PathSeparator), z.ZKRoot, rel)
 }
 
 // Close releases the Zookeeper connection.

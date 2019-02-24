@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +26,7 @@ const (
 	IfRegRO = uint32(0444)
 
 	// MaxConcurrentRequests represents max number of parallel requests to send to the remote ZK directory.
-	// This attempts to speed up OpenDir requests to trees that have many children.
+	// This attempts to speed up OpenDir requests against trees that have many children.
 	MaxConcurrentRequests = 25
 )
 
@@ -81,12 +83,15 @@ func (f *FuseFS) GetAttr(path string, context *fuse.Context) (*fuse.Attr, fuse.S
 
 	var fa fuse.Attr
 
-	// if a znode has 1 or more assigned child nodes, the file mode is set to a directory.
-	// Otherwise this znode is considered a regular file.
-	if stat.NumChildren > 0 {
-		fa.Mode = fuse.S_IFDIR | dirPermissions(f.IsReadWrite)
-	} else {
+	// if a znode has 1 or more assigned child nodes, that znode is considered to be a directory.
+	// Additionally force IFREG filemode if path name matches the magic/special ZNodeMarker.
+	if strings.HasSuffix(path, ZNodeMarker) {
+		// marker file is always RO
+		fa.Mode = fuse.S_IFREG | IfRegRO
+	} else if stat.NumChildren == 0 {
 		fa.Mode = fuse.S_IFREG | filePermissions(f.IsReadWrite)
+	} else {
+		fa.Mode = fuse.S_IFDIR | dirPermissions(f.IsReadWrite)
 	}
 
 	// additional file attributues populated from the znode (stat) data.
@@ -110,6 +115,7 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 	}
 
 	var dirEntries []fuse.DirEntry
+	dirEntries = append(dirEntries, fuse.DirEntry{Name: ZNodeMarker, Mode: fuse.S_IFREG})
 
 	if len(children) == 0 {
 		return dirEntries, fuse.OK
@@ -133,7 +139,7 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 				<-chanLimiter
 			}()
 
-			found, stat, err := f.zh.Exists(filepath.Join(path, "/", directory))
+			found, stat, err := f.zh.Exists(filepath.Join(path, string(os.PathSeparator), directory))
 			if err != nil {
 				log.Error(err)
 				return
@@ -156,6 +162,7 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 		}(path, child)
 	}
 	wg.Wait()
+
 	return dirEntries, fuse.OK
 }
 
@@ -199,6 +206,11 @@ func (f *FuseFS) Open(path string, flags uint32, context *fuse.Context) (file no
 
 // Unlink removes the file/znode from the tree.
 func (f *FuseFS) Unlink(path string, context *fuse.Context) (code fuse.Status) {
+	// gaurd ensures that a user cannot remove the ZNodeMarker file
+	if strings.HasSuffix(path, ZNodeMarker) {
+		return fuse.EPERM
+	}
+
 	err := f.zh.Delete(path, -1)
 	if err != nil {
 		log.WithFields(log.Fields{
