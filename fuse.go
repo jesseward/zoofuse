@@ -206,7 +206,7 @@ func (f *FuseFS) Open(path string, flags uint32, context *fuse.Context) (file no
 
 // Unlink removes the file/znode from the tree.
 func (f *FuseFS) Unlink(path string, context *fuse.Context) (code fuse.Status) {
-	// gaurd ensures that a user cannot remove the ZNodeMarker file
+	// guard ensures that a user cannot remove the ZNodeMarker file
 	if strings.HasSuffix(path, ZNodeMarker) {
 		return fuse.EPERM
 	}

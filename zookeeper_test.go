@@ -23,7 +23,7 @@ func TestZKPath(t *testing.T) {
 	assert.Equal(t, "/test-path", zh.ZKPath("/test-path/"))
 	assert.Equal(t, "/test-path", zh.ZKPath("test-path"))
 	assert.Equal(t, "/test-path/sub-node", zh.ZKPath("test-path/sub-node"))
-	assert.Equal(t, "/test-path/sub-node", zh.ZKPath("test-path/sub-node"))
+	assert.Equal(t, "/test-path/sub-node", zh.ZKPath("test-path/sub-node"+"/"+ZNodeMarker))
 
 	// limit the scope of ZK access via a jail/chroot.
 	zh.ZKRoot = "/chroot"

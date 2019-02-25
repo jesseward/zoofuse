@@ -51,4 +51,6 @@ MacOS does not provide native support for FUSE. In order to run this client on M
 
 *Directories*
 
-Zookeeper does not have the notion of a Directory. In order to simulate and map a znode to a file system directory object, a Get (to Zookeeper) is made against the znode, if the target znode > 0 children, this znode is considered to be a "directory" (file type  set to S_IFDIR). This leads to race conditions where certain znodes/file objects may flip back and forth between S_IFDIR and S_IFREG (regular file). 
+Zookeeper does not have the notion of a Directory. In order to simulate and map a znode to a file system directory object, a Get (to Zookeeper) is made against the znode, if the target znode > 0 children, this znode is considered to be a "directory" (file type  set to S_IFDIR). This leads to race conditions where certain znodes/file objects may flip back and forth between S_IFDIR and S_IFREG (regular file).
+
+In order to read the contents of a znode that has been mapped as a filesystem directory, Zoofuse places a special file into the directory named `__znode_data__`. This file exposes the contents of a "directory" znode.
