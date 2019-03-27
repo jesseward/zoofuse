@@ -178,6 +178,9 @@ func (f *FuseFS) Truncate(name string, size uint64, context *fuse.Context) (code
 // Create new file object. This creates a new znode inside ZK with an emtpy set of data. Create also
 // returns a new FuseFile struct that provides read/write capabilities.
 func (f *FuseFS) Create(path string, flags uint32, mode uint32, context *fuse.Context) (file nodefs.File, code fuse.Status) {
+	if !f.IsReadWrite {
+		return nil, fuse.EACCES
+	}
 	_, err := f.zh.Create(path, nil, int32(0), zk.WorldACL(zk.PermAll))
 
 	if err != nil {
@@ -206,9 +209,10 @@ func (f *FuseFS) Open(path string, flags uint32, context *fuse.Context) (file no
 
 // Unlink removes the file/znode from the tree.
 func (f *FuseFS) Unlink(path string, context *fuse.Context) (code fuse.Status) {
-	// guard ensures that a user cannot remove the ZNodeMarker file
-	if strings.HasSuffix(path, ZNodeMarker) {
-		return fuse.EPERM
+	// guard ensures that a user cannot remove the ZNodeMarker file at any time.
+	// Additional checks in place to ensure ZooFuse is launched in +rw mode.
+	if strings.HasSuffix(path, ZNodeMarker) || !f.IsReadWrite {
+		return fuse.EACCES
 	}
 
 	err := f.zh.Delete(path, -1)
@@ -251,6 +255,14 @@ func (f *FuseFS) Rmdir(path string, context *fuse.Context) (code fuse.Status) {
 			"err":  err,
 		}).Error("received error when deleting directory")
 		return fuse.ENOENT
+	}
+	return fuse.OK
+}
+
+// Access limits capabilities to the file when requested mode is for +w.
+func (f *FuseFS) Access(name string, mode uint32, context *fuse.Context) (code fuse.Status) {
+	if mode == fuse.W_OK && !f.IsReadWrite {
+		return fuse.EACCES
 	}
 	return fuse.OK
 }
