@@ -6,8 +6,6 @@
 	█▌▪▄█▀▐█▌.▐▌▐█▌.▐▌██▌.▐█▄█▌▐█▄▪▐█▐█▄▄▌
 	·▀▀▀ • ▀█▄▀▪ ▀█▄▀▪▀▀▀  ▀▀▀  ▀▀▀▀  ▀▀▀ 
 ```
-[![Build Status](https://travis-ci.com/jesseward/zoofuse.svg?token=CStMxikntB3yCXtypKsx&branch=master)](https://travis-ci.com/jesseward/zoofuse)
-
 
 ZooFUSE implements a FUSE filesystem that is backed by a ZooKeeper directory tree. This allows the user to navigate through the Zookeeper tree structure using the same command line tools commonly used to navigate a local file system.
 
