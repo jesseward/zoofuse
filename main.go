@@ -3,23 +3,45 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/fuse/pathfs"
-	log "github.com/sirupsen/logrus"
 )
 
-func init() {
+var programLevel = new(slog.LevelVar)
 
-	log.SetFormatter(&log.TextFormatter{
-		TimestampFormat: "2006-01-02T15:04:05.000",
-		FullTimestamp:   true,
-	})
-	log.SetLevel(log.InfoLevel)
-	log.SetReportCaller(true) // show calling method/line num (https://github.com/sirupsen/logrus/pull/850)
+func setupLogger(logFile string, debug bool) (*os.File, error) {
+	var w io.Writer = os.Stdout
+	var logH *os.File
+	var err error
 
+	if logFile != "" {
+		logH, err = os.OpenFile(logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			return nil, err
+		}
+		w = logH
+	}
+
+	if debug {
+		programLevel.Set(slog.LevelDebug)
+	} else {
+		programLevel.Set(slog.LevelInfo)
+	}
+
+	opts := &slog.HandlerOptions{
+		Level:     programLevel,
+		AddSource: true,
+	}
+
+	logger := slog.New(slog.NewTextHandler(w, opts))
+	slog.SetDefault(logger)
+
+	return logH, nil
 }
 
 func banner(rootfs, zk, zkchroot, logFile string, rw bool) {
@@ -44,7 +66,6 @@ booted...
 }
 
 func main() {
-
 	// the stretchr/testify/mock package introduces testing flags into the default
 	// flagset. Creation of this flagset is to workaround this, so the unwanted flags are
 	// not displayed..
@@ -67,23 +88,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *logFile != "" {
-		logH, err := os.OpenFile(*logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-		if err == nil {
-			log.SetOutput(logH)
-		}
+	logH, err := setupLogger(*logFile, *debug)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to setup logger: %v\n", err)
+		os.Exit(1)
+	}
+	if logH != nil {
 		defer logH.Close()
 	}
 
-	if *debug {
-		log.SetLevel(log.DebugLevel)
-	}
-
-	zooHandler, err := NewZooHandler([]string{*zkConn}, *zkChroot, cmd.Arg(0))
+	zooHandler, err := NewZooHandler([]string{*zkConn}, *zkChroot)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"err": err,
-		}).Fatal("Failed to create ZooHandler")
+		slog.Error("Failed to create ZooHandler", "err", err)
+		os.Exit(1)
 	}
 
 	fuseFS := FuseFS{
@@ -96,14 +113,13 @@ func main() {
 
 	err = fuseFS.Mount(nil)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"err": err,
-		}).Fatal("Failed to mount FUSE")
+		slog.Error("Failed to mount FUSE", "err", err)
+		os.Exit(1)
 	}
 	defer fuseFS.Unmount()
 
 	// attempt self healing logic batch capturing sig int/term.
-	c := make(chan os.Signal)
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c

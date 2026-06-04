@@ -13,19 +13,21 @@ func TestRead(t *testing.T) {
 	mockZooKeeper := &MockZooHandle{
 		zk: mock.Mock{},
 	}
-	bytes := make([]byte, 3)
-	ff := NewFuseFile(bytes, 0, "mock/path", mockZooKeeper)
+	bytes := []byte{1, 2, 3}
+	ff := NewFuseFile(bytes, 0, "mock/path", mockZooKeeper, false)
 
-	// assert that we can read from the Nth byte (n=3).
-	buf := []byte{}
-	_, b := ff.Read(buf, 3)
-	assert.Equal(t, fuse.Status(0), b, "return status was not 0")
-	// assert that we panic when we attempt to read beyond the buffer length
-	// TODO: is this a bug in go-fuse https://github.com/hanwen/go-fuse/blob/master/fuse/nodefs/files.go#L46
-	// there is no upper boundry protection around the offset (off), so it allows to read beyond the buffer.
-	// Though I am not sure if this would be hit in a normal situation...
-	assert.Panics(t, func() { ff.Read(buf, int64(len(bytes)+1)) }, "did not panic when attempting to read beyond buffer")
+	// assert that we can read
+	buf := make([]byte, 2)
+	res, status := ff.Read(buf, 0)
+	assert.Equal(t, fuse.OK, status)
+	assert.Equal(t, 2, res.Size())
 
+	// assert that we do not panic when we attempt to read beyond the buffer length
+	assert.NotPanics(t, func() {
+		res, status := ff.Read(buf, int64(len(bytes)+1))
+		assert.Equal(t, fuse.OK, status)
+		assert.Equal(t, 0, res.Size())
+	})
 }
 
 // TestWrite creates a FuseFile ojbect and exercises the Write() function.
@@ -35,7 +37,7 @@ func TestWrite(t *testing.T) {
 	}
 
 	bytes := make([]byte, 3)
-	ff := NewFuseFile(bytes, 0, "mock/path", mockZooKeeper)
+	ff := NewFuseFile(bytes, 0, "mock/path", mockZooKeeper, true) // Must be RW
 
 	mockZooKeeper.zk.On("Set", "mock/path", bytes, int32(-1)).Return(&zk.Stat{DataLength: int32(len(bytes))}, nil)
 
@@ -43,4 +45,38 @@ func TestWrite(t *testing.T) {
 	size, stat := ff.Write(bytes, 0)
 	assert.Equal(t, uint32(3), size)
 	assert.Equal(t, fuse.OK, stat)
+}
+
+// TestWriteReadOnly verifies that write fails on RO file
+func TestWriteReadOnly(t *testing.T) {
+	mockZooKeeper := &MockZooHandle{
+		zk: mock.Mock{},
+	}
+
+	bytes := make([]byte, 3)
+	ff := NewFuseFile(bytes, 0, "mock/path", mockZooKeeper, false) // RO
+
+	size, stat := ff.Write(bytes, 0)
+	assert.Equal(t, uint32(0), size)
+	assert.Equal(t, fuse.EACCES, stat)
+}
+
+// TestWriteOffset verifies that write at offset merges data correctly (Read-Modify-Write)
+func TestWriteOffset(t *testing.T) {
+	mockZooKeeper := &MockZooHandle{
+		zk: mock.Mock{},
+	}
+
+	initialBytes := []byte("foo")
+	ff := NewFuseFile(initialBytes, 0, "mock/path", mockZooKeeper, true)
+
+	writeBytes := []byte("bar")
+	expectedBytes := []byte("fbar")
+
+	mockZooKeeper.zk.On("Set", "mock/path", expectedBytes, int32(-1)).Return(&zk.Stat{DataLength: int32(len(expectedBytes))}, nil)
+
+	size, stat := ff.Write(writeBytes, 1)
+	assert.Equal(t, uint32(3), size) // bytes written
+	assert.Equal(t, fuse.OK, stat)
+	assert.Equal(t, expectedBytes, ff.data)
 }

@@ -18,15 +18,10 @@ jobs:
         go-version: 'stable'
 
     - name: Check formatting
-      run: |
-        if [ -n "$(gofmt -l .)" ]; then
-          echo "Go code is not formatted:"
-          gofmt -l .
-          exit 1
-        fi
+      run: make check-fmt
 
     - name: Build
-      run: go build -v ./...
+      run: make build
 
     - name: Test
-      run: go test -v ./...
+      run: make test

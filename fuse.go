@@ -1,17 +1,17 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
+	"log/slog"
+	"path"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/fuse"
 	"github.com/hanwen/go-fuse/fuse/nodefs"
 	"github.com/hanwen/go-fuse/fuse/pathfs"
 	"github.com/samuel/go-zookeeper/zk"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -29,6 +29,24 @@ const (
 	// This attempts to speed up OpenDir requests against trees that have many children.
 	MaxConcurrentRequests = 25
 )
+
+func zkErrorToStatus(err error) fuse.Status {
+	if err == nil {
+		return fuse.OK
+	}
+	switch err {
+	case zk.ErrNoNode:
+		return fuse.ENOENT
+	case zk.ErrNodeExists:
+		return fuse.Status(syscall.EEXIST)
+	case zk.ErrNotEmpty:
+		return fuse.Status(syscall.ENOTEMPTY)
+	case zk.ErrNoAuth:
+		return fuse.EACCES
+	default:
+		return fuse.EIO
+	}
+}
 
 // FuseFS is the container for the filesystem. This is built-upon the go-fuse "pathfs" machinery. The other notable
 // property is the `zh` reference, this accepts anytype that implements the `Zoohandler` interface.
@@ -60,24 +78,22 @@ func filePermissions(isReadWrite bool) uint32 {
 // we perform a query (Get) against the znode to ensure it exists. If the znode exists
 // this assigns the attributes for the file object. A further check is made to determine
 // if the znode has any children, if so the S_IFDIR file mode is set.
-func (f *FuseFS) GetAttr(path string, context *fuse.Context) (*fuse.Attr, fuse.Status) {
-	if path == "" {
+func (f *FuseFS) GetAttr(filePath string, context *fuse.Context) (*fuse.Attr, fuse.Status) {
+	if filePath == "" {
 		return &fuse.Attr{
 			Mode: fuse.S_IFDIR | dirPermissions(f.IsReadWrite),
 		}, fuse.OK
 	}
 
-	found, stat, err := f.zh.Exists(path)
+	found, stat, err := f.zh.Exists(filePath)
 
 	if err != nil {
-		log.Error(err)
-		return nil, fuse.ENOENT
+		slog.Error("Exists failed in GetAttr", "err", err)
+		return nil, zkErrorToStatus(err)
 	}
 
 	if !found {
-		log.WithFields(log.Fields{
-			"path": path,
-		}).Warn("znode does not exist")
+		slog.Warn("znode does not exist", "path", filePath)
 		return nil, fuse.ENOENT
 	}
 
@@ -85,7 +101,7 @@ func (f *FuseFS) GetAttr(path string, context *fuse.Context) (*fuse.Attr, fuse.S
 
 	// if a znode has 1 or more assigned child nodes, that znode is considered to be a directory.
 	// Additionally force IFREG filemode if path name matches the magic/special ZNodeMarker.
-	if strings.HasSuffix(path, ZNodeMarker) {
+	if strings.HasSuffix(filePath, ZNodeMarker) {
 		// marker file is always RO
 		fa.Mode = fuse.S_IFREG | IfRegRO
 	} else if stat.NumChildren == 0 {
@@ -104,14 +120,11 @@ func (f *FuseFS) GetAttr(path string, context *fuse.Context) (*fuse.Attr, fuse.S
 // OpenDir builds the current working directory from the remote ZK tree. This is done by
 // performing a fetch of all `Children` znodes for the current `path`. The only file
 // attributes set here is the `mode` (S_IFDIR or S_IFREG)
-func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, fuse.Status) {
-	children, _, err := f.zh.Children(path)
+func (f *FuseFS) OpenDir(dirPath string, context *fuse.Context) ([]fuse.DirEntry, fuse.Status) {
+	children, _, err := f.zh.Children(dirPath)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"path": path,
-			"err":  err,
-		}).Error("failed to fetch children")
-		return nil, fuse.ENOENT
+		slog.Error("failed to fetch children", "path", dirPath, "err", err)
+		return nil, zkErrorToStatus(err)
 	}
 
 	var dirEntries []fuse.DirEntry
@@ -129,9 +142,10 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 
 	chanLimiter := make(chan struct{}, maxWorkers)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for _, child := range children {
 		wg.Add(1)
-		go func(path, directory string) {
+		go func(parentPath, directory string) {
 			defer wg.Done()
 			chanLimiter <- struct{}{}
 
@@ -139,16 +153,14 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 				<-chanLimiter
 			}()
 
-			found, stat, err := f.zh.Exists(filepath.Join(path, string(os.PathSeparator), directory))
+			found, stat, err := f.zh.Exists(path.Join(parentPath, directory))
 			if err != nil {
-				log.Error(err)
+				slog.Error("Exists failed in OpenDir", "err", err)
 				return
 			}
 
 			if !found {
-				log.WithFields(log.Fields{
-					"path": path,
-				}).Error("znode does not exist")
+				slog.Error("znode does not exist", "path", parentPath)
 				return
 			}
 
@@ -158,8 +170,10 @@ func (f *FuseFS) OpenDir(path string, context *fuse.Context) ([]fuse.DirEntry, f
 			} else {
 				dirEntry.Mode = fuse.S_IFREG
 			}
+			mu.Lock()
 			dirEntries = append(dirEntries, dirEntry)
-		}(path, child)
+			mu.Unlock()
+		}(dirPath, child)
 	}
 	wg.Wait()
 
@@ -177,84 +191,68 @@ func (f *FuseFS) Truncate(name string, size uint64, context *fuse.Context) (code
 
 // Create new file object. This creates a new znode inside ZK with an emtpy set of data. Create also
 // returns a new FuseFile struct that provides read/write capabilities.
-func (f *FuseFS) Create(path string, flags uint32, mode uint32, context *fuse.Context) (file nodefs.File, code fuse.Status) {
+func (f *FuseFS) Create(filePath string, flags uint32, mode uint32, context *fuse.Context) (file nodefs.File, code fuse.Status) {
 	if !f.IsReadWrite {
 		return nil, fuse.EACCES
 	}
-	_, err := f.zh.Create(path, nil, int32(0), zk.WorldACL(zk.PermAll))
+	_, err := f.zh.Create(filePath, nil, int32(0), zk.WorldACL(zk.PermAll))
 
 	if err != nil {
-		log.WithFields(log.Fields{
-			"path": path,
-			"err":  err,
-		}).Error("failed to create znode.")
-		return nil, fuse.ENOENT
+		slog.Error("failed to create znode", "path", filePath, "err", err)
+		return nil, zkErrorToStatus(err)
 	}
-	return NewFuseFile(nil, IfRegRW, path, f.zh), fuse.OK
+	return NewFuseFile(nil, filePermissions(f.IsReadWrite), filePath, f.zh, f.IsReadWrite), fuse.OK
 }
 
 // Open a filedescriptor for read or write ops. Open returns a new FuseFile (nodefs.File), populated with the
 // current znode payload (or empty)
-func (f *FuseFS) Open(path string, flags uint32, context *fuse.Context) (file nodefs.File, code fuse.Status) {
-	data, _, err := f.zh.Get(path)
+func (f *FuseFS) Open(filePath string, flags uint32, context *fuse.Context) (file nodefs.File, code fuse.Status) {
+	data, _, err := f.zh.Get(filePath)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"path": path,
-			"err":  err,
-		}).Error("unable to Get znode from zookeeper")
-		return nil, fuse.ENOENT
+		slog.Error("unable to Get znode from zookeeper", "path", filePath, "err", err)
+		return nil, zkErrorToStatus(err)
 	}
-	return NewFuseFile([]byte(data), IfRegRW, path, f.zh), fuse.OK
+	return NewFuseFile([]byte(data), filePermissions(f.IsReadWrite), filePath, f.zh, f.IsReadWrite), fuse.OK
 }
 
 // Unlink removes the file/znode from the tree.
-func (f *FuseFS) Unlink(path string, context *fuse.Context) (code fuse.Status) {
+func (f *FuseFS) Unlink(filePath string, context *fuse.Context) (code fuse.Status) {
 	// guard ensures that a user cannot remove the ZNodeMarker file at any time.
 	// Additional checks in place to ensure ZooFuse is launched in +rw mode.
-	if strings.HasSuffix(path, ZNodeMarker) || !f.IsReadWrite {
+	if strings.HasSuffix(filePath, ZNodeMarker) || !f.IsReadWrite {
 		return fuse.EACCES
 	}
 
-	err := f.zh.Delete(path, -1)
+	err := f.zh.Delete(filePath, -1)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"path": path,
-			"err":  err,
-		}).Error("unable to Delete znode from zookeeper")
-		return fuse.EIO
+		slog.Error("unable to Delete znode from zookeeper", "path", filePath, "err", err)
+		return zkErrorToStatus(err)
 	}
 	return fuse.OK
 }
 
 // Rmdir removes a znode and its children.
-func (f *FuseFS) Rmdir(path string, context *fuse.Context) (code fuse.Status) {
-	found, stat, err := f.zh.Exists(path)
+func (f *FuseFS) Rmdir(dirPath string, context *fuse.Context) (code fuse.Status) {
+	found, stat, err := f.zh.Exists(dirPath)
 	if err != nil {
-		log.Error(err)
-		return fuse.ENOENT
+		slog.Error("Exists failed in Rmdir", "err", err)
+		return zkErrorToStatus(err)
 	}
 
 	if !found {
-		log.WithFields(log.Fields{
-			"path": path,
-		}).Error("znode does not exist")
+		slog.Error("znode does not exist", "path", dirPath)
 		return fuse.ENOENT
 	}
 
 	if stat.NumChildren == 0 {
-		log.WithFields(log.Fields{
-			"path": path,
-		}).Error("ENOTDIR - skipping, number of children is 0.")
+		slog.Error("ENOTDIR - skipping, number of children is 0", "path", dirPath)
 		return fuse.ENOTDIR
 	}
 
-	err = f.zh.Delete(path, -1)
+	err = f.zh.Delete(dirPath, -1)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"path": path,
-			"err":  err,
-		}).Error("received error when deleting directory")
-		return fuse.ENOENT
+		slog.Error("received error when deleting directory", "path", dirPath, "err", err)
+		return zkErrorToStatus(err)
 	}
 	return fuse.OK
 }
@@ -270,7 +268,7 @@ func (f *FuseFS) Access(name string, mode uint32, context *fuse.Context) (code f
 // Mount manages the creation of the FileSystem.
 func (f *FuseFS) Mount(opts []string) error {
 
-	log.Infof("mount FUSE filesystem at FuseRoot=%s", f.FuseRoot)
+	slog.Info("mount FUSE filesystem", "FuseRoot", f.FuseRoot)
 	nfs := pathfs.NewPathNodeFs(f, nil)
 	fsopts := nodefs.NewOptions()
 	fsopts.EntryTimeout = 1 * time.Second
@@ -295,6 +293,6 @@ func (f *FuseFS) Serve() {
 // a user has an open file handle that resides within FUSE, the file system will not cleanly unmount.
 // TODO: add check for open files under Root mount?
 func (f *FuseFS) Unmount() {
-	log.Infof("Unmounting FUSE filesystem at FuseRoot=%s ...", f.FuseRoot)
+	slog.Info("Unmounting FUSE filesystem", "FuseRoot", f.FuseRoot)
 	f.FSServer.Unmount()
 }
