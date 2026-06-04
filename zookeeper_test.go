@@ -14,7 +14,7 @@ func TestZKPath(t *testing.T) {
 		zk: mock.Mock{},
 	}
 
-	zh := ZooHandle{zk: mockClient, ZKRoot: "/", FuseMount: "/mnt/fuse"}
+	zh := ZooHandle{zk: mockClient, ZKRoot: "/"}
 
 	// testing without a chroot zookeeper config.
 	zh.ZKRoot = "/"
